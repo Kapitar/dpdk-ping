@@ -2,6 +2,8 @@
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
+#include <rte_mbuf_core.h>
+#include <rte_ether.h>
 #include <stdlib.h>
 
 #define RX_RING_SIZE 1024
@@ -9,6 +11,7 @@
 
 #define MBUF_NUM 8192
 #define MBUF_CACHE_SIZE 256
+#define BURST_SIZE 32
 
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 	const uint16_t rx_rings = 1, tx_rings = 1;
@@ -105,6 +108,51 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 	return 0;
 }
 
+static __rte_noreturn void lcore_main(void) {
+	uint16_t port;
+
+	/*
+	 * Check that the port is on the same NUMA node as the polling thread
+	 * for best performance.
+	 */
+	RTE_ETH_FOREACH_DEV(port) {
+		if (rte_eth_dev_socket_id(port) >= 0 &&
+				rte_eth_dev_socket_id(port) !=
+						(int)rte_socket_id())
+			printf("WARNING, port %u is on remote NUMA node to "
+					"polling thread.\n\tPerformance will "
+					"not be optimal.\n", port);
+	}
+
+	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
+			rte_lcore_id());
+
+	for (;;) {
+		/*
+		 * Receive packets on a port and forward them on the paired
+		 * port. The mapping is 0 -> 1, 1 -> 0, 2 -> 3, 3 -> 2, etc.
+		 */
+		RTE_ETH_FOREACH_DEV(port) {
+			/* Get burst of RX packets, from first port of pair. */
+			struct rte_mbuf *bufs[BURST_SIZE];
+
+			const uint16_t rx_num = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
+
+			if (unlikely(rx_num == 0))
+				continue;
+
+			for (uint16_t i = 0; i < rx_num; i++) {
+			    struct rte_mbuf* message = bufs[i];
+                struct rte_ether_hdr *eth = rte_pktmbuf_mtod(message, struct rte_ether_hdr*);
+
+                printf("Received a message");
+
+			    rte_pktmbuf_free(message);
+			}
+		}
+	}
+}
+
 int main(int argc, char* argv[]) {
     // Initialize EAL
     int ret = rte_eal_init(argc, argv);
@@ -134,9 +182,12 @@ int main(int argc, char* argv[]) {
 
     // Initialize ports
     uint16_t port_id;
-   	RTE_ETH_FOREACH_DEV(port_id)
+   	RTE_ETH_FOREACH_DEV(port_id) {
 		if (port_init(port_id, mbuf_pool) != 0)
 		    rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n", port_id);
+    }
+
+    lcore_main();
 
     return 0;
 }
