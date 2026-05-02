@@ -1,10 +1,17 @@
+#include <bits/types/FILE.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_mbuf.h>
 #include <rte_mbuf_core.h>
 #include <rte_ether.h>
-#include <stdlib.h>
+#include <rte_arp.h>
+#include <rte_ip.h>
+#include <rte_icmp.h>
+#include <sys/select.h>
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
@@ -108,6 +115,49 @@ static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 	return 0;
 }
 
+static inline void arp_handler(struct rte_mbuf *mbuf, struct rte_ether_hdr *eth_hdr, uint16_t port) {
+    struct rte_arp_hdr const *arp_hdr = (struct rte_arp_hdr*) (eth_hdr + 1);
+
+    if (arp_hdr == NULL) {
+        rte_exit(EXIT_FAILURE, "ARP packet header is too small");
+    }
+
+    // Check if that's a request ARP type
+    if (rte_be_to_cpu_16(arp_hdr->arp_opcode) == RTE_ARP_OP_REQUEST) {
+        struct rte_mbuf *reply_mbuf = rte_pktmbuf_alloc(mbuf->pool);
+        struct rte_ether_hdr *reply_eth_hdr = (struct rte_ether_hdr*) rte_pktmbuf_append(
+            reply_mbuf,
+            sizeof(struct rte_ether_hdr) + sizeof(struct rte_arp_hdr)
+        );
+        struct rte_arp_hdr *reply_arp_hdr = (struct rte_arp_hdr*) (reply_eth_hdr + 1);
+
+        // Fill Ethernet header fields
+        reply_eth_hdr->ether_type = RTE_ETHER_TYPE_ARP;
+        rte_ether_addr_copy(&eth_hdr->src_addr, &reply_eth_hdr->dst_addr);
+        rte_eth_macaddr_get(port, &reply_eth_hdr->src_addr);
+
+        // Fill ARP header fields
+        reply_arp_hdr->arp_opcode = RTE_ARP_OP_REPLY;
+        reply_arp_hdr->arp_hardware = arp_hdr->arp_hardware;
+        reply_arp_hdr->arp_protocol = arp_hdr->arp_protocol;
+        reply_arp_hdr->arp_hlen = arp_hdr->arp_hlen;
+        reply_arp_hdr->arp_plen = arp_hdr->arp_plen;
+
+        rte_eth_macaddr_get(port, &reply_arp_hdr->arp_data.arp_sha);
+        reply_arp_hdr->arp_data.arp_sip = arp_hdr->arp_data.arp_tip;
+
+        rte_ether_addr_copy(&eth_hdr->src_addr, &reply_arp_hdr->arp_data.arp_tha);
+        reply_arp_hdr->arp_data.arp_tip = arp_hdr->arp_data.arp_sip;
+
+        int num_sent = rte_eth_tx_burst(port, 0, &reply_mbuf, 1);
+        if (num_sent == 0) {
+            rte_pktmbuf_free(reply_mbuf);
+        }
+    } else {
+        rte_exit(EXIT_FAILURE, "Wrong ARP request");
+    }
+}
+
 static __rte_noreturn void lcore_main(void) {
 	uint16_t port;
 
@@ -142,12 +192,19 @@ static __rte_noreturn void lcore_main(void) {
 				continue;
 
 			for (uint16_t i = 0; i < rx_num; i++) {
-			    struct rte_mbuf* message = bufs[i];
-                struct rte_ether_hdr *eth = rte_pktmbuf_mtod(message, struct rte_ether_hdr*);
+			    struct rte_mbuf *mbuf = bufs[i];
+                struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr*);
 
-                printf("Received a message");
+                if (rte_be_to_cpu_16(eth_hdr->ether_type) == RTE_ETHER_TYPE_ARP) {
+                    printf("Received ARP message\n");
+                    arp_handler(mbuf, eth_hdr, port);
+                } else if (rte_be_to_cpu_16(eth_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
+                    printf("Received IPv4 message\n");
+                } else {
+                    printf("unknown\n");
+                }
 
-			    rte_pktmbuf_free(message);
+			    rte_pktmbuf_free(mbuf);
 			}
 		}
 	}
@@ -162,7 +219,7 @@ int main(int argc, char* argv[]) {
 
     // Make sure NIC uses DPDK
     uint16_t ports_num = rte_eth_dev_count_avail();
-    if (ports_num < 0) {
+    if (ports_num == 0) {
         rte_exit(EXIT_FAILURE, "No ports found");
     }
 
