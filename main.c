@@ -150,6 +150,8 @@ static inline void arp_handler(struct rte_mbuf *mbuf, struct rte_ether_hdr *eth_
         reply_arp_hdr->arp_data.arp_tip = arp_hdr->arp_data.arp_sip;
 
         int num_sent = rte_eth_tx_burst(port, 0, &reply_mbuf, 1);
+
+        // If the packet wasn't send, we need to manually free it
         if (num_sent == 0) {
             rte_pktmbuf_free(reply_mbuf);
         }
