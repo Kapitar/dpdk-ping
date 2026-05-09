@@ -170,6 +170,7 @@ static inline void icmp_handler(struct rte_mbuf *mbuf,
 
     // Check if the someone is pinging us
     if (icmp_hdr->icmp_type != RTE_IP_ICMP_ECHO_REQUEST) {
+        rte_pktmbuf_free(mbuf);
         return;
     }
 
@@ -266,17 +267,16 @@ static __rte_noreturn void lcore_main(void) {
                 struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(mbuf, struct rte_ether_hdr*);
 
                 if (rte_be_to_cpu_16(eth_hdr->ether_type) == RTE_ETHER_TYPE_ARP) {
-                    printf("Received ARP message\n");
                     arp_handler(mbuf, eth_hdr, port);
                 } else if (rte_be_to_cpu_16(eth_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
-                    printf("Received IPv4 message\n");
-
                     struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *) (eth_hdr + 1);
                     if (ip_hdr->next_proto_id == IPPROTO_ICMP) {
                         icmp_handler(mbuf, eth_hdr, ip_hdr, port);
+                    } else {
+                        rte_pktmbuf_free(mbuf);
                     }
                 } else {
-                    printf("unknown\n");
+                    rte_pktmbuf_free(mbuf);
                 }
 			}
 		}
