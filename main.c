@@ -132,12 +132,12 @@ static inline void arp_handler(struct rte_mbuf *mbuf, struct rte_ether_hdr *eth_
         struct rte_arp_hdr *reply_arp_hdr = (struct rte_arp_hdr*) (reply_eth_hdr + 1);
 
         // Fill Ethernet header fields
-        reply_eth_hdr->ether_type = RTE_ETHER_TYPE_ARP;
+        reply_eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP);
         rte_ether_addr_copy(&eth_hdr->src_addr, &reply_eth_hdr->dst_addr);
         rte_eth_macaddr_get(port, &reply_eth_hdr->src_addr);
 
         // Fill ARP header fields
-        reply_arp_hdr->arp_opcode = RTE_ARP_OP_REPLY;
+        reply_arp_hdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
         reply_arp_hdr->arp_hardware = arp_hdr->arp_hardware;
         reply_arp_hdr->arp_protocol = arp_hdr->arp_protocol;
         reply_arp_hdr->arp_hlen = arp_hdr->arp_hlen;
@@ -158,6 +158,74 @@ static inline void arp_handler(struct rte_mbuf *mbuf, struct rte_ether_hdr *eth_
     } else {
         rte_exit(EXIT_FAILURE, "Wrong ARP request");
     }
+
+    rte_pktmbuf_free(mbuf);
+}
+
+static inline void icmp_handler(struct rte_mbuf *mbuf,
+                                struct rte_ether_hdr *eth_hdr,
+                                struct rte_ipv4_hdr *ip_hdr,
+                                uint16_t port) {
+    struct rte_icmp_hdr *icmp_hdr = (struct rte_icmp_hdr *) (ip_hdr + 1);
+
+    // Check if the someone is pinging us
+    if (icmp_hdr->icmp_type != RTE_IP_ICMP_ECHO_REQUEST) {
+        return;
+    }
+
+    uint16_t payload_len = rte_be_to_cpu_16(ip_hdr->total_length) - sizeof(struct rte_ipv4_hdr) - sizeof(struct rte_icmp_hdr);
+
+    struct rte_mbuf *reply_mbuf = rte_pktmbuf_alloc(mbuf->pool);
+    struct rte_ether_hdr *reply_eth_hdr = (struct rte_ether_hdr *) rte_pktmbuf_append(
+        reply_mbuf,
+        sizeof(struct rte_ether_hdr) +
+        sizeof(struct rte_ipv4_hdr) +
+        sizeof(struct rte_icmp_hdr) +
+        payload_len
+    );
+    struct rte_ipv4_hdr *reply_ip_hdr = (struct rte_ipv4_hdr *) (reply_eth_hdr + 1);
+    struct rte_icmp_hdr *reply_icmp_hdr = (struct rte_icmp_hdr *) (reply_ip_hdr + 1);
+
+    uint8_t *reply_payload = (uint8_t *) (reply_icmp_hdr + 1);
+    uint8_t *payload = (uint8_t *) (icmp_hdr + 1);
+
+    // Fill Ethernet header fields
+    eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+    rte_ether_addr_copy(&eth_hdr->src_addr, &reply_eth_hdr->dst_addr);
+    rte_eth_macaddr_get(port, &reply_eth_hdr->src_addr);
+
+    // Fill IP header fields
+    reply_ip_hdr->src_addr = rte_cpu_to_be_32(MY_IP);
+    reply_ip_hdr->dst_addr = ip_hdr->src_addr;
+    reply_ip_hdr->version_ihl = ip_hdr->version_ihl;
+    reply_ip_hdr->type_of_service = 0;
+    reply_ip_hdr->total_length = ip_hdr->total_length;
+    reply_ip_hdr->packet_id = 0;
+    reply_ip_hdr->fragment_offset = 0;
+    reply_ip_hdr->time_to_live = 64;
+    reply_ip_hdr->next_proto_id = IPPROTO_ICMP;
+    reply_ip_hdr->hdr_checksum = 0;
+    reply_ip_hdr->hdr_checksum = rte_ipv4_cksum(reply_ip_hdr);
+
+    // Add ICMP payload
+    memcpy(reply_payload, payload, payload_len);
+
+    // Fill ICMP header fields
+    reply_icmp_hdr->icmp_code = 0;
+    reply_icmp_hdr->icmp_type = RTE_IP_ICMP_ECHO_REPLY;
+    reply_icmp_hdr->icmp_ident = icmp_hdr->icmp_ident;
+    reply_icmp_hdr->icmp_seq_nb = icmp_hdr->icmp_seq_nb;
+    reply_icmp_hdr->icmp_cksum = 0;
+    reply_icmp_hdr->icmp_cksum = ~rte_raw_cksum(reply_icmp_hdr, sizeof(struct rte_icmp_hdr) + payload_len);
+
+    int num_sent = rte_eth_tx_burst(port, 0, &reply_mbuf, 1);
+
+    // If the packet wasn't send, we need to manually free it
+    if (num_sent == 0) {
+        rte_pktmbuf_free(reply_mbuf);
+    }
+
+    rte_pktmbuf_free(mbuf);
 }
 
 static __rte_noreturn void lcore_main(void) {
@@ -202,11 +270,14 @@ static __rte_noreturn void lcore_main(void) {
                     arp_handler(mbuf, eth_hdr, port);
                 } else if (rte_be_to_cpu_16(eth_hdr->ether_type) == RTE_ETHER_TYPE_IPV4) {
                     printf("Received IPv4 message\n");
+
+                    struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *) (eth_hdr + 1);
+                    if (ip_hdr->next_proto_id == IPPROTO_ICMP) {
+                        icmp_handler(mbuf, eth_hdr, ip_hdr, port);
+                    }
                 } else {
                     printf("unknown\n");
                 }
-
-			    rte_pktmbuf_free(mbuf);
 			}
 		}
 	}
