@@ -16,9 +16,11 @@
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
 
-#define MBUF_NUM 8192
+#define MBUF_NUM 16383
 #define MBUF_CACHE_SIZE 256
 #define BURST_SIZE 32
+
+#define MY_IP RTE_IPV4(172, 31, 37, 1)
 
 static inline int port_init(uint16_t port, struct rte_mempool *mbuf_pool) {
 	const uint16_t rx_rings = 1, tx_rings = 1;
